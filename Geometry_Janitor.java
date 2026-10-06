@@ -93,8 +93,6 @@ public class Geometry_Janitor extends StarMacro {
             
             sim.println("========================================");
             sim.println("Geometry swapped. Executing all Mesh Operations...");
-            opManager.executeAll();
-            sim.println("Geometry Janitor complete. Ready for solver.");
 
         } catch (Exception e) {
             sim.println("[CRITICAL ERROR] processing geometry swap: " + e.getMessage());
