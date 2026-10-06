@@ -14,121 +14,155 @@ public class master_sweep extends StarMacro {
         Simulation sim = getActiveSimulation();
         
         try {
-            // 1. Read Config File
             BufferedReader configReader = new BufferedReader(new FileReader("sweep_config.txt"));
             String[] targetReports = configReader.readLine().split(",");
             String[] targetFieldFunctions = configReader.readLine().split(",");
             String outputDir = configReader.readLine(); 
             configReader.close();
             
-            // 2. Prepare Output Results CSV
-            FileWriter resultsWriter = new FileWriter(outputDir + "/Aero_Map_Results.csv");
-            
-            // 3. Read the Run Matrix
             BufferedReader matrixReader = new BufferedReader(new FileReader("sweep_matrix.csv"));
             String headerLine = matrixReader.readLine();
             String[] parametersToSweep = headerLine.split(",");
+            String line = matrixReader.readLine(); 
+            matrixReader.close();
+
+            if (line == null) return;
             
-            // Write Header
-            resultsWriter.write("Run_ID," + headerLine + "," + String.join(",", targetReports) + "\n");
-            
-            // 4. THE MAIN SWEEP LOOP
-            String line;
-            int runId = 1;
-            
-            while ((line = matrixReader.readLine()) != null) {
-                sim.println("==================================================");
-                sim.println("🚀 STARTING SWEEP RUN " + runId);
-                sim.println("==================================================");
+            sim.println("==================================================");
+            sim.println("🚀 STARTING AUTOMATED CFD RUN");
+            sim.println("==================================================");
+
+            // ==========================================
+            // PHASE 1: AUTO-TAGGER (LEFT SIDE)
+            // ==========================================
+            sim.println("🔍 Scanning imported geometry names...");
+            for (GeometryPart part : sim.get(GeometryPartManager.class).getObjects()) {
+                String name = part.getPresentationName().toLowerCase();
                 
-                String[] values = line.split(",");
+                if (name.contains("mirror") || name.contains("copy")) continue;
                 
-                // --- CREATE DYNAMIC SUBFOLDER ---
-                StringBuilder folderName = new StringBuilder(outputDir + "/Run_" + runId);
-                for (int i = 0; i < parametersToSweep.length; i++) {
-                    folderName.append("_").append(parametersToSweep[i]).append("_").append(values[i]);
+                sim.println("   -> Found Part: '" + part.getPresentationName() + "'");
+
+                if (name.contains("front wheel")) {
+                    part.setPresentationName("Front Left Wheel");
+                    applyTag(sim, part, "Front Wheel");
+                } else if (name.contains("rear wheel")) {
+                    part.setPresentationName("Rear Left Wheel");
+                    applyTag(sim, part, "Rear Wheel");
+                } else if (name.contains("chassis")) {
+                    part.setPresentationName("Chassis");
+                    applyTag(sim, part, "Chassis");
+                } else if (name.contains("front wing")) {
+                    part.setPresentationName("Front Wing");
+                    applyTag(sim, part, "Front Wing");
+                } else if (name.contains("rear wing")) {
+                    part.setPresentationName("Rear Wing");
+                    applyTag(sim, part, "Rear Wing");
+                } else if (name.contains("floor")) {
+                    part.setPresentationName("Floor");
+                    applyTag(sim, part, "Floor");
                 }
-                String runFolder = folderName.toString();
-                new File(runFolder).mkdirs(); 
-                
-                // A. Apply Parameters
-                for (int i = 0; i < parametersToSweep.length; i++) {
-                    ScalarGlobalParameter param = (ScalarGlobalParameter) sim.get(GlobalParameterManager.class).getObject(parametersToSweep[i]);
-                    param.getQuantity().setDefinition(values[i]);
-                    sim.println("Set " + parametersToSweep[i] + " to " + values[i] + " (Base SI)");
-                }
-                
-                // B. Clear Old Physics and Remesh
-                sim.println("Clearing old solution, fields, and mesh...");
-                sim.getSolution().clearSolution(Solution.Clear.History, Solution.Clear.Fields, Solution.Clear.Mesh);
-                sim.get(MeshOperationManager.class).executeAll();
-                
-                // C. Solve Physics
-                sim.println("Running RANS Solver...");
-                sim.getSimulationIterator().run();
-                
-                // D. Extract Scalar Reports
-                StringBuilder resultRow = new StringBuilder();
-                resultRow.append(runId).append(",").append(line);
-                
-                for (String reportName : targetReports) {
-                    Report report = (Report) sim.getReportManager().getObject(reportName);
-                    double val = report.getReportMonitorValue();
-                    resultRow.append(",").append(val);
-                }
-                
-                resultsWriter.write(resultRow.toString() + "\n");
-                resultsWriter.flush(); 
-                
-                // E. Save Hardcopy Images to the SUBFOLDER
-                sim.println("Saving Images (Scenes, Layouts, and Residuals)...");
-                
-                // E1. Tagged Scenes
-                for (ClientServerObject obj : sim.getSceneManager().getObjects()) {
-                    if (obj instanceof Scene && obj instanceof Taggable) {
-                        Scene scene = (Scene) obj;
-                        if (hasCaptureTag(scene)) {
-                            scene.printAndWait(resolvePath(runFolder + "/" + scene.getPresentationName() + ".png"), 1, 1920, 1080, true, false);
-                            sim.println("Saved Scene: " + scene.getPresentationName());
-                        }
-                    }
-                }
-                
-                // E2. Tagged Layouts
-                try {
-                    for (ClientServerObject obj : sim.get(LayoutViewManager.class).getObjects()) {
-                        if (obj instanceof LayoutView && obj instanceof Taggable) {
-                            LayoutView layout = (LayoutView) obj;
-                            if (hasCaptureTag(layout)) {
-                                layout.printToFile(resolvePath(runFolder + "/" + layout.getPresentationName() + ".png"), 1, 1920, 1080, true, false);
-                                sim.println("Saved Layout: " + layout.getPresentationName());
-                            }
-                        }
-                    }
-                } catch (Exception e) {
-                    sim.println("Note: Layout export failed - " + e.getMessage());
-                }
-                
-                // E3. Residuals Plot (Automatic capture, no tag required)
-                try {
-                    ResidualPlot residualPlot = (ResidualPlot) sim.getPlotManager().getPlot("Residuals");
-                    if (residualPlot != null) {
-                        residualPlot.encode(resolvePath(runFolder + "/Residuals.png"), "png", 1920, 1080, true, false);
-                        sim.println("Saved Plot: Residuals");
-                    }
-                } catch (Exception e) {
-                    sim.println("Note: Residuals plot export failed.");
-                }
-                
-                runId++;
             }
             
-            matrixReader.close();
+            sim.println("⚙️ Executing Part Operations (Mirrors, Transforms)...");
+            for (MeshOperation op : sim.get(MeshOperationManager.class).getObjects()) {
+                String opName = op.getClass().getSimpleName();
+                if (!opName.contains("AutoMesh") && !opName.contains("AutomatedMesh")) {
+                    try { op.execute(); } catch (Exception e) {}
+                }
+            }
+
+            // ==========================================
+            // PHASE 2: AUTO-TAGGER (RIGHT SIDE)
+            // ==========================================
+            sim.println("🔍 Scanning for mirrored geometry...");
+            for (GeometryPart part : sim.get(GeometryPartManager.class).getObjects()) {
+                String name = part.getPresentationName().toLowerCase();
+                
+                if (name.contains("front left wheel") && (name.contains("mirror") || name.contains("copy") || name.contains(" 2"))) {
+                    part.setPresentationName("Front Right Wheel");
+                    applyTag(sim, part, "Front Wheel");
+                } else if (name.contains("rear left wheel") && (name.contains("mirror") || name.contains("copy") || name.contains(" 2"))) {
+                    part.setPresentationName("Rear Right Wheel");
+                    applyTag(sim, part, "Rear Wheel");
+                }
+            }
+            
+            // 3. APPLY DOE PARAMETERS
+            String[] values = line.split(",");
+            for (int i = 0; i < parametersToSweep.length; i++) {
+                try {
+                    ScalarGlobalParameter param = (ScalarGlobalParameter) sim.get(GlobalParameterManager.class).getObject(parametersToSweep[i]);
+                    param.getQuantity().setDefinition(values[i]);
+                    sim.println("Set " + parametersToSweep[i] + " to " + values[i]);
+                } catch (Exception e) {
+                    sim.println("Skipped parameter " + parametersToSweep[i] + " (likely an NX parameter).");
+                }
+            }
+            
+            sim.println("⚙️ Clearing old solution and meshing...");
+            sim.getSolution().clearSolution(Solution.Clear.History, Solution.Clear.Fields, Solution.Clear.Mesh);
+            sim.get(MeshOperationManager.class).executeAll();
+            
+            sim.println("🚀 Running RANS Solver...");
+            sim.getSimulationIterator().run();
+            
+            FileWriter resultsWriter = new FileWriter(outputDir + "/Aero_Map_Results.csv");
+            resultsWriter.write(headerLine + "," + String.join(",", targetReports) + "\n");
+            
+            StringBuilder resultRow = new StringBuilder(line);
+            for (String reportName : targetReports) {
+                Report report = (Report) sim.getReportManager().getObject(reportName);
+                double val = report.getReportMonitorValue();
+                resultRow.append(",").append(val);
+            }
+            resultsWriter.write(resultRow.toString() + "\n");
+            resultsWriter.flush();
             resultsWriter.close();
-            sim.println("✅ BATCH SWEEP COMPLETE!");
+            
+            sim.println("📷 Saving Images (Scenes, Layouts, and Residuals)...");
+            for (ClientServerObject obj : sim.getSceneManager().getObjects()) {
+                if (obj instanceof Scene && obj instanceof Taggable) {
+                    Scene scene = (Scene) obj;
+                    if (hasCaptureTag(scene)) {
+                        scene.printAndWait(resolvePath(outputDir + "/" + scene.getPresentationName() + ".png"), 1, 1920, 1080, true, false);
+                    }
+                }
+            }
+            
+            try {
+                for (ClientServerObject obj : sim.get(LayoutViewManager.class).getObjects()) {
+                    if (obj instanceof LayoutView && obj instanceof Taggable) {
+                        LayoutView layout = (LayoutView) obj;
+                        if (hasCaptureTag(layout)) {
+                            layout.printToFile(resolvePath(outputDir + "/" + layout.getPresentationName() + ".png"), 1, 1920, 1080, true, false);
+                        }
+                    }
+                }
+            } catch (Exception e) {}
+            
+            try {
+                ResidualPlot residualPlot = (ResidualPlot) sim.getPlotManager().getPlot("Residuals");
+                if (residualPlot != null) {
+                    residualPlot.encode(resolvePath(outputDir + "/Residuals.png"), "png", 1920, 1080, true, false);
+                }
+            } catch (Exception e) {}
+            
+            sim.println("✅ SINGLE RUN COMPLETE!");
             
         } catch (Exception e) {
             sim.println("🚨 MACRO CRASHED: " + e.getMessage());
+        }
+    }
+    
+    private void applyTag(Simulation sim, GeometryPart part, String tagName) {
+        TagManager tagMgr = sim.get(TagManager.class);
+        if (tagMgr.has(tagName)) {
+            Tag tag = (Tag) tagMgr.getObject(tagName);
+            part.getTagGroup().add(tag);
+            sim.println("   [SUCCESS] Tagged '" + part.getPresentationName() + "' with [" + tagName + "]");
+        } else {
+            sim.println("   [WARNING] Tag [" + tagName + "] does not exist in the simulation!");
         }
     }
     
