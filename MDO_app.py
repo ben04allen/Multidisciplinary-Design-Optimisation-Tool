@@ -46,6 +46,8 @@ if 'cad_files' not in st.session_state:
     st.session_state.cad_files = []
 if 'cad_mappings' not in st.session_state:
     st.session_state.cad_mappings = {}
+if 'nx_assembly_path' not in st.session_state:
+    st.session_state.nx_assembly_path = "Choose NX Assembly (.prt) file from folder"
 
 # ==========================================
 # WINDOWS NATIVE FILE BROWSERS
@@ -65,6 +67,14 @@ def open_cad_dialog():
     file_paths = filedialog.askopenfilenames(filetypes=[("CAD Files", "*.prt *.step *.stp *.iges *.igs *.x_t *.stl")])
     root.destroy()
     return list(file_paths)
+
+def open_prt_dialog():
+    root = tk.Tk()
+    root.withdraw()
+    root.wm_attributes('-topmost', 1) 
+    file_path = filedialog.askopenfilename(filetypes=[("NX Part Files", "*.prt")])
+    root.destroy()
+    return file_path
 
 # ==========================================
 # SIDEBAR WIZARD ROUTING
@@ -118,30 +128,44 @@ if step == 0:
                     st.sidebar.error("STAR-CCM+ Execution Failed!")
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### CAD Geometry Swap (Optional)")
-    st.sidebar.caption("Select new .x_t or .step files to test in this sweep.")
-    
-    if st.sidebar.button("➕ Select CAD Parts", width="stretch"):
-        new_cad_files = open_cad_dialog()
-        if new_cad_files:
-            st.session_state.cad_files.extend(new_cad_files)
-            st.session_state.cad_files = list(set(st.session_state.cad_files)) 
-            st.rerun()
+    st.sidebar.markdown("### NX CAD Integration")
+    st.sidebar.caption("Link the Master Assembly for geometric sweeps.")
 
-    if st.session_state.cad_files:
-        st.sidebar.markdown("**Assign Geometry Tags:**")
-        categories = ["Ignore", "Chassis", "Front Wing", "Rear Wing", "Floor", "Front Left Wheel", "Front Right Wheel", "Rear Left Wheel", "Rear Right Wheel"]
-        
-        for i, fpath in enumerate(st.session_state.cad_files):
-            fname = os.path.basename(fpath)
-            st.session_state.cad_mappings[fpath] = st.sidebar.selectbox(
-                f"⚙️ {fname}", categories, key=f"cad_sel_{i}"
-            )
-            
-        if st.sidebar.button("🗑️ Clear Selected CAD"):
-            st.session_state.cad_files = []
-            st.session_state.cad_mappings = {}
-            st.rerun()
+    col_nx_path, col_nx_browse = st.sidebar.columns([4, 1])
+    nx_file_input = col_nx_path.text_input("Master Assembly (.prt) Path:", value=st.session_state.nx_assembly_path, label_visibility="collapsed")
+
+    if col_nx_browse.button("📁", key="nx_browse"):
+        selected_nx_file = open_prt_dialog()
+        if selected_nx_file:
+            # tkinter sometimes returns forward slashes; standardize them
+            st.session_state.nx_assembly_path = selected_nx_file.replace("/", "\\")
+            st.rerun() 
+    else:
+        st.session_state.nx_assembly_path = nx_file_input
+
+    if st.sidebar.button("🔍 Scan NX Parameters", width="stretch"):
+        if not os.path.exists(st.session_state.nx_assembly_path):
+            st.sidebar.error("NX Assembly file not found!")
+        else:
+            with st.spinner("Booting NX in headless mode..."):
+                nx_executable = r"C:\Program Files\Siemens\NX1926\NXBIN\run_journal.exe"
+                command = [nx_executable, "nx_probe.py", "-args", st.session_state.nx_assembly_path]
+                result = subprocess.run(command, capture_output=True, text=True)
+
+                if os.path.exists("nx_metadata.json"):
+                    with open("nx_metadata.json", "r") as f:
+                        data = json.load(f)
+                    
+                    st.session_state.nx_params = data.get("nx_parameters", [])
+                    st.sidebar.success(f"Loaded {len(st.session_state.nx_params)} NX parameters!")
+                else:
+                    st.sidebar.error("Failed to read NX parameters.")
+                    st.sidebar.code(result.stderr)
+
+    if st.session_state.get('nx_params'):
+        with st.sidebar.expander("Detected NX Parameters"):
+            for p in st.session_state.nx_params:
+                st.write(f"- {p}")
 
     st.sidebar.markdown("---")
     if st.sidebar.button("Next: Sweep Setup ➡️", type="primary", width="stretch"):
@@ -186,15 +210,17 @@ elif step == 1:
         st.session_state.prev_num_runs = num_runs
 
     st.sidebar.markdown("### Parameter 1 (X-Axis)")
+    all_sweep_params = st.session_state.sim_params + st.session_state.get('nx_params', [])
     p1_default_idx = 0
     if prev_df is not None and len(prev_df.columns) > 1:
         if prev_df.columns[1] in st.session_state.sim_params:
             p1_default_idx = st.session_state.sim_params.index(prev_df.columns[1])
             
-    param_1 = st.sidebar.selectbox("Select Target", st.session_state.sim_params, index=p1_default_idx, key="p1")
-    col1, col2 = st.sidebar.columns(2)
+    param_1 = st.sidebar.selectbox("Select Target", all_sweep_params, index=p1_default_idx, key="p1")
+    col_b1, col1, col2 = st.sidebar.columns(3)
+    p1_base = col_b1.number_input("Base", value=0.033, step=0.005, format="%.4f", key="p1_base")
     p1_min = col1.number_input("Min", value=0.000, step=0.005, format="%.4f", key="p1_min")
-    p1_max = col2.number_input("Max", value=0.000, step=0.005, format="%.4f", key="p1_max")
+    p1_max = col2.number_input("Max", value=0.050, step=0.005, format="%.4f", key="p1_max")
 
     if is_2d:
         st.sidebar.markdown("### Parameter 2 (Y-Axis)")
@@ -203,12 +229,13 @@ elif step == 1:
             if prev_df.columns[2] in st.session_state.sim_params:
                 p2_default_idx = st.session_state.sim_params.index(prev_df.columns[2])
                 
-        param_2 = st.sidebar.selectbox("Select Target", st.session_state.sim_params, index=p2_default_idx, key="p2")
-        col3, col4 = st.sidebar.columns(2)
+        param_2 = st.sidebar.selectbox("Select Target", all_sweep_params, index=p2_default_idx, key="p2")
+        col_b2, col3, col4 = st.sidebar.columns(3)
+        p2_base = col_b2.number_input("Base", value=0.033, step=0.005, format="%.4f", key="p2_base")
         p2_min = col3.number_input("Min", value=0.000, step=0.005, format="%.4f", key="p2_min")
-        p2_max = col4.number_input("Max", value=0.000, step=0.005, format="%.4f", key="p2_max")
+        p2_max = col4.number_input("Max", value=0.050, step=0.005, format="%.4f", key="p2_max")
     else:
-        param_2, p2_min, p2_max = None, None, None
+        param_2, p2_base, p2_min, p2_max = None, None, None, None
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Kinematic Constraints")
@@ -231,10 +258,14 @@ elif step == 1:
         st.session_state.current_step = 0
         st.rerun()
     if col_next1.button("Next ➡️", type="primary", width="stretch"):
+        st.session_state.perm_use_adaptive = use_adaptive
+        st.session_state.perm_al_targets = al_targets    
+        
         st.session_state.perm_p1_min = p1_min
         st.session_state.perm_p1_max = p1_max
         st.session_state.perm_p1 = param_1
         if is_2d:
+            st.session_state.perm_p2_base = p2_base
             st.session_state.perm_p2_min = p2_min
             st.session_state.perm_p2_max = p2_max
             st.session_state.perm_p2 = param_2
@@ -303,15 +334,8 @@ elif step == 2:
 # MATH: LATIN HYPERCUBE & ACTIVE LEARNING
 # ==========================================
 if step == 2:
-    p1_min = st.session_state.perm_p1_min
-    p1_max = st.session_state.perm_p1_max
-    if is_2d:
-        p2_min = st.session_state.perm_p2_min
-        p2_max = st.session_state.perm_p2_max
     param_1 = st.session_state.perm_p1
-    param_2 = st.session_state.perm_p2 if is_2d else None
-    num_runs = st.session_state.prev_num_runs
-    use_adaptive = False 
+    param_2 = st.session_state.get('perm_p2', None)
 
 def generate_doe():
     def get_smart_decimals(val):
@@ -319,41 +343,145 @@ def generate_doe():
         mag = math.floor(math.log10(abs(val)))
         return max(0, -(mag - 1))
     
+    l_p1_base = st.session_state.get('perm_p1_base', 0.0)
     l_p1_min = st.session_state.perm_p1_min
     l_p1_max = st.session_state.perm_p1_max
+    
+    l_p2_base = st.session_state.get('perm_p2_base', 0.0)
     l_p2_min = st.session_state.get('perm_p2_min', 0)
     l_p2_max = st.session_state.get('perm_p2_max', 0)
+    
     l_num_runs = st.session_state.prev_num_runs
     l_is_2d = st.session_state.sweep_dim == 2
     
     l_apply_constraints = st.session_state.get('perm_apply_constraints', False)
     l_max_rrh_ratio = st.session_state.get('perm_max_rrh_ratio', None)
+    
+    # FETCH ADAPTIVE SETTINGS
+    l_use_adaptive = st.session_state.get('perm_use_adaptive', False)
+    l_al_targets = st.session_state.get('perm_al_targets', [])
+    is_appending = prev_df is not None
 
     p1_decimals = get_smart_decimals(l_p1_min)
     p2_decimals = get_smart_decimals(l_p2_min) if l_is_2d else 0
-
-    if not l_is_2d:
-        sampler = qmc.LatinHypercube(d=1)
-        raw_samples = sampler.random(n=l_num_runs)
-        scaled = qmc.scale(raw_samples, [l_p1_min], [l_p1_max])
-        scaled[:, 0] = np.round(scaled[:, 0], p1_decimals)
-        return scaled
-    else:
-        sampler = qmc.LatinHypercube(d=2)
-        if l_apply_constraints and l_max_rrh_ratio is not None:
-            raw_samples = sampler.random(n=l_num_runs * 10) 
-            scaled = qmc.scale(raw_samples, [l_p1_min, l_p2_min], [l_p1_max, l_p2_max])
-            valid_mask = scaled[:, 1] <= (scaled[:, 0] * l_max_rrh_ratio)
-            valid_points = scaled[valid_mask][:l_num_runs]
-            valid_points[:, 0] = np.round(valid_points[:, 0], p1_decimals)
-            valid_points[:, 1] = np.round(valid_points[:, 1], p2_decimals)
-            return valid_points
+    
+    # =========================================================
+    # 1. ANCHOR GENERATION (Boundary Augmentation)
+    # =========================================================
+    anchors = []
+    if not is_appending:
+        # A. Always inject the user's Baseline as Run 1
+        anchors.append([l_p1_base, l_p2_base] if l_is_2d else [l_p1_base])
+        
+        # B. Inject Domain Extremes
+        if not l_is_2d:
+            anchors.extend([[l_p1_min], [l_p1_max]])
         else:
-            raw_samples = sampler.random(n=l_num_runs)
-            scaled = qmc.scale(raw_samples, [l_p1_min, l_p2_min], [l_p1_max, l_p2_max])
-            scaled[:, 0] = np.round(scaled[:, 0], p1_decimals)
-            scaled[:, 1] = np.round(scaled[:, 1], p2_decimals)
-            return scaled
+            # Generate the 4 absolute corners + 3 potential constraint intersections
+            raw_corners = [
+                [l_p1_min, l_p2_min],
+                [l_p1_max, l_p2_min],
+                [l_p1_min, l_p2_max],
+                [l_p1_max, l_p2_max]
+            ]
+            
+            if l_apply_constraints and l_max_rrh_ratio is not None:
+                if l_max_rrh_ratio > 0:
+                    raw_corners.append([l_p2_max / l_max_rrh_ratio, l_p2_max])  # Top bound intersection
+                raw_corners.append([l_p1_min, l_p1_min * l_max_rrh_ratio])      # Left bound intersection
+                raw_corners.append([l_p1_max, l_p1_max * l_max_rrh_ratio])      # Right bound intersection
+
+            # Filter vertices mathematically to ensure they sit inside the feasible domain
+            for pt in raw_corners:
+                p1_c, p2_c = pt[0], pt[1]
+                if not (l_p1_min - 1e-5 <= p1_c <= l_p1_max + 1e-5): continue
+                if not (l_p2_min - 1e-5 <= p2_c <= l_p2_max + 1e-5): continue
+                if l_apply_constraints and l_max_rrh_ratio is not None:
+                    if p2_c > (p1_c * l_max_rrh_ratio) + 1e-5: continue
+                anchors.append([p1_c, p2_c])
+
+    # C. Format, Round, and Deduplicate
+    if len(anchors) > 0:
+        anchors_arr = np.array(anchors)
+        anchors_arr[:, 0] = np.round(anchors_arr[:, 0], p1_decimals)
+        if l_is_2d:
+            anchors_arr[:, 1] = np.round(anchors_arr[:, 1], p2_decimals)
+            
+        # Deduplicate while strictly preserving the run sequence (Baseline must stay Run 1)
+        _, unique_indices = np.unique(anchors_arr, axis=0, return_index=True)
+        anchors_arr = anchors_arr[np.sort(unique_indices)]
+    else:
+        anchors_arr = np.array([]).reshape(0, 2 if l_is_2d else 1)
+
+    # Calculate remaining run budget
+    runs_to_generate = l_num_runs if is_appending else l_num_runs - len(anchors_arr)
+
+    # =========================================================
+    # 2. ACTIVE LEARNING / LHS (For remaining budget)
+    # =========================================================
+    new_points = np.array([]).reshape(0, 2 if l_is_2d else 1)
+    
+    if runs_to_generate > 0:
+        if is_appending and l_use_adaptive and len(l_al_targets) > 0:
+            target = l_al_targets[0]
+            x_true = prev_df[param_1].values
+            z_true = prev_df[target].values
+            
+            scaler = MinMaxScaler()
+            kernel = C(1.0, (1e-3, 1e3)) * Matern(length_scale=[1.0, 1.0] if l_is_2d else 1.0, length_scale_bounds=(0.2, 10.0), nu=1.5)
+            gp = GaussianProcessRegressor(kernel=kernel, alpha=1e-10, n_restarts_optimizer=5, normalize_y=True)
+            
+            if l_is_2d:
+                y_true = prev_df[param_2].values
+                X_train_scaled = scaler.fit_transform(np.c_[x_true, y_true])
+            else:
+                X_train_scaled = scaler.fit_transform(x_true.reshape(-1, 1))
+                
+            gp.fit(X_train_scaled, z_true)
+            
+            sampler = qmc.LatinHypercube(d=2 if l_is_2d else 1)
+            candidates_raw = sampler.random(n=5000)
+            
+            if l_is_2d:
+                candidates = qmc.scale(candidates_raw, [l_p1_min, l_p2_min], [l_p1_max, l_p2_max])
+                if l_apply_constraints and l_max_rrh_ratio is not None:
+                    candidates = candidates[candidates[:, 1] <= (candidates[:, 0] * l_max_rrh_ratio)]
+            else:
+                candidates = qmc.scale(candidates_raw, [l_p1_min], [l_p1_max])
+                
+            _, sigma = gp.predict(scaler.transform(candidates), return_std=True)
+            highest_uncert_indices = np.argsort(sigma)[::-1]
+            selected_indices = highest_uncert_indices[::25][:runs_to_generate]
+            if len(selected_indices) < runs_to_generate:
+                 selected_indices = highest_uncert_indices[:runs_to_generate]
+                 
+            new_points = candidates[selected_indices]
+            
+        else:
+            sampler = qmc.LatinHypercube(d=2 if l_is_2d else 1)
+            if not l_is_2d:
+                new_points = qmc.scale(sampler.random(n=runs_to_generate), [l_p1_min], [l_p1_max])
+            else:
+                if l_apply_constraints and l_max_rrh_ratio is not None:
+                    raw_samples = sampler.random(n=runs_to_generate * 10) 
+                    scaled = qmc.scale(raw_samples, [l_p1_min, l_p2_min], [l_p1_max, l_p2_max])
+                    new_points = scaled[scaled[:, 1] <= (scaled[:, 0] * l_max_rrh_ratio)][:runs_to_generate]
+                else:
+                    new_points = qmc.scale(sampler.random(n=runs_to_generate), [l_p1_min, l_p2_min], [l_p1_max, l_p2_max])
+
+        # Format decimal places for newly generated points
+        new_points[:, 0] = np.round(new_points[:, 0], p1_decimals)
+        if l_is_2d:
+            new_points[:, 1] = np.round(new_points[:, 1], p2_decimals)
+
+    # =========================================================
+    # 3. FINAL ASSEMBLY
+    # =========================================================
+    if not is_appending:
+        final_points = np.vstack((anchors_arr, new_points)) if new_points.size else anchors_arr
+        return final_points[:l_num_runs] # Truncates if budget is smaller than anchor count
+    else:
+        return new_points
 
 if step == 2 and init_button:
     st.session_state.doe_points = generate_doe()
@@ -442,136 +570,131 @@ with tab2:
                 run_dir = os.path.join(os.getcwd(), run_name)
                 os.makedirs(run_dir, exist_ok=True)
                 
+                if os.path.exists("stop_sweep.txt"):
+                    os.remove("stop_sweep.txt")
+                
                 matrix_df = pd.DataFrame(st.session_state.doe_points.copy(), columns=[param_1, param_2] if is_2d else [param_1])
-                def prepare_values(col_name, val): 
-                    return math.radians(val) if "Angle" in col_name else val 
-                    
-                matrix_df[param_1] = matrix_df[param_1].apply(lambda x: prepare_values(param_1, x))
-                if is_2d: 
-                    matrix_df[param_2] = matrix_df[param_2].apply(lambda x: prepare_values(param_2, x))
-                matrix_df.to_csv("sweep_matrix.csv", index=False)
                 
-                with open("sweep_config.txt", "w") as f:
-                    f.write(",".join(targets) + "\n" + ",".join(selected_ff) + "\n" + run_dir.replace("\\", "/") + "\n") 
+                nx_params = st.session_state.get('nx_params', [])
+                uses_nx = param_1 in nx_params or (is_2d and param_2 in nx_params)
                 
-                # --- MAP EXACT TAGS FOR STAR-CCM+ ---
-                with open("geometry_swap.csv", "w") as f:
-                    for cad_path, target_name in st.session_state.cad_mappings.items():
-                        if target_name != "Ignore":
-                            if "Front" in target_name and "Wheel" in target_name:
-                                target_tag = "Front Wheel"
-                            elif "Rear" in target_name and "Wheel" in target_name:
-                                target_tag = "Rear Wheel"
-                            else:
-                                target_tag = target_name 
-                                
-                            f.write(f"{cad_path},{target_name},{target_tag}\n")
-                    
-                status_box.info(f"🚀 Launching STAR-CCM+ on {cores} Cores... Telemetry will stream below and save to '{run_name}'.")
-                
-                # --- KEEP WINDOWS AWAKE ---
                 ES_CONTINUOUS = 0x80000000
                 ES_SYSTEM_REQUIRED = 0x00000001
-                try:
-                    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
-                except Exception:
-                    pass
+                try: ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+                except Exception: pass
                 
                 try:
-                    sweep_start_time = time.time() - 5
                     log_file_path = os.path.join(run_dir, "starccm_batch.log")
-                    
-                    process = subprocess.Popen([
-                        starccm_exe, 
-                        "-np", str(cores), 
-                        "-batch", "Geometry_Janitor.java,master_sweep.java", 
-                        st.session_state.sim_file_path
-                    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-                    
-                    csv_path = os.path.join(run_dir, "Aero_Map_Results.csv")
                     live_monitor = st.empty()
                     
-                    with open(log_file_path, "w") as log_file:
-                        last_telemetry_check = time.time()
-                        for line in iter(process.stdout.readline, ""):
-                            # 1. Print directly to standard console
-                            sys.stdout.write(line)
-                            sys.stdout.flush()
-                            
-                            # 2. Write to log file
-                            log_file.write(line)
-                            log_file.flush()
-                            
-                            # 3. Periodically update Streamlit Telemetry Table
-                            if time.time() - last_telemetry_check > 3:
-                                if os.path.exists(csv_path) and os.stat(csv_path).st_size > 0:
-                                    try:
-                                        live_results = pd.read_csv(csv_path)
-                                        if prev_df is not None:
-                                            max_id = prev_df['Run_ID'].max() if 'Run_ID' in prev_df.columns else len(prev_df)
-                                            live_results['Run_ID'] += max_id
-                                            live_display = pd.concat([prev_df, live_results], ignore_index=True)
-                                        else: 
-                                            live_display = live_results
-                                            
-                                        with live_monitor.container():
-                                            st.markdown(f"### 📡 Live Telemetry: Run {len(live_results)} / {actual_runs} Completed")
-                                            st.dataframe(live_display, width='stretch')
-                                    except Exception:
-                                        pass
-                                last_telemetry_check = time.time()
+                    nx_exe = r"C:\Program Files\Siemens\NX1926\NXBIN\run_journal.exe"
+                    cumulative_results = prev_df if prev_df is not None else pd.DataFrame()
                     
-                    process.wait()
-                    live_monitor.empty()
-                    
-                    if process.returncode == 0 or os.path.exists("stop_sweep.txt"): 
-                        status_box.success("✅ Sweep Complete!")
-                    else: 
-                        status_box.error(f"🚨 STAR-CCM+ Execution Failed. Exit code: {process.returncode}. Check starccm_batch.log for details.")
-                    
-                    if os.path.exists(csv_path) and os.stat(csv_path).st_size > 0:
-                        try:
-                            new_results = pd.read_csv(csv_path)
+                    with open(log_file_path, "w", encoding="utf-8", errors="replace") as log_file:
+                        for idx, row in matrix_df.iterrows():
+                            if os.path.exists("stop_sweep.txt"):
+                                status_box.warning("🚨 Sweep aborted by user.")
+                                break
+                                
+                            run_id = int(idx) + 1
                             if prev_df is not None:
-                                max_id = prev_df['Run_ID'].max() if 'Run_ID' in prev_df.columns else len(prev_df)
+                                run_id += prev_df['Run_ID'].max() if 'Run_ID' in prev_df.columns else len(prev_df)
                                 
-                                for folder_name in os.listdir(run_dir):
-                                    folder_path = os.path.join(run_dir, folder_name)
-                                    if os.path.isdir(folder_path) and os.path.getmtime(folder_path) > sweep_start_time:
-                                        if folder_name.startswith("Run_"):
-                                            parts = folder_name.split("_", 2)
-                                            if len(parts) >= 2 and parts[1].isdigit():
-                                                new_id = int(parts[1]) + max_id
-                                                new_folder_name = f"Run_{new_id}_{parts[2]}" if len(parts) > 2 else f"Run_{new_id}"
-                                                try: os.rename(folder_path, os.path.join(run_dir, new_folder_name))
-                                                except Exception: pass
+                            status_box.info(f"🚀 Processing Run {idx+1}/{actual_runs} (ID: {run_id})...")
+                            
+                            # --- 1. CREATE DYNAMIC SUBFOLDER ---
+                            subfolder_name = f"Run_{run_id}"
+                            for col in matrix_df.columns:
+                                subfolder_name += f"_{col}_{row[col]}"
+                            specific_run_dir = os.path.join(run_dir, subfolder_name)
+                            os.makedirs(specific_run_dir, exist_ok=True)
+                            
+                            # Route STAR-CCM+ outputs to the specific subfolder
+                            with open("sweep_config.txt", "w") as f:
+                                f.write(",".join(targets) + "\n" + ",".join(selected_ff) + "\n" + specific_run_dir.replace("\\", "/") + "\n") 
+                            
+                            # --- 2. NX CAD MORPHING ---
+                            parasolid_name = f"Run_{run_id}_Geometry.x_t" if uses_nx else "Baseline_Geometry.x_t"
+                            parasolid_path = os.path.join(run_dir, parasolid_name)
+                            
+                            if uses_nx or (not uses_nx and not os.path.exists(parasolid_path)):
+                                status_box.info(f"⚙️ Morphing CAD in NX for Run {run_id}...")
+                                nx_config = {
+                                    "assembly_path": st.session_state.nx_assembly_path,
+                                    "export_path": parasolid_path,
+                                    "parameters": {}
+                                }
+                                if param_1 in nx_params: nx_config["parameters"][param_1] = row[param_1]
+                                if is_2d and param_2 in nx_params: nx_config["parameters"][param_2] = row[param_2]
                                 
-                                new_results['Run_ID'] += max_id
-                                real_results = pd.concat([prev_df, new_results], ignore_index=True)
-                                real_results.to_csv(os.path.join(run_dir, f"{run_name}.csv"), index=False)
-                                try: os.remove(csv_path)
-                                except Exception: pass
-                            else:
-                                real_results = new_results
-                                real_results.to_csv(os.path.join(run_dir, f"{run_name}.csv"), index=False)
-                                try: os.remove(csv_path)
-                                except Exception: pass
-                        except Exception as csv_err:
-                            st.error(f"🚨 Failed to process the results CSV: {csv_err}")
-                    else:
-                        st.error("🚨 Output CSV was empty or missing. Check starccm_batch.log to see the Java error log!")
+                                json_config_path = os.path.abspath("nx_run_config.json")
+                                with open(json_config_path, "w") as f: json.dump(nx_config, f)
+                                
+                                nx_process = subprocess.run([nx_exe, "nx_morph.py", "-args", json_config_path], capture_output=True, text=True)
+                                
+                                if not os.path.exists(parasolid_path):
+                                    st.error(f"🚨 NX failed to export the geometry for Run {run_id}!\n\nNX Error Log:\n{nx_process.stderr}")
+                                    with open("stop_sweep.txt", "w") as f: f.write("ABORT")
+                                    break
+                            
+                            # --- 3. WRITE CSVs FOR STAR-CCM+ ---
+                            single_row_df = pd.DataFrame([row])
+                            single_row_df.to_csv("sweep_matrix.csv", index=False)
+                            
+                            with open("geometry_swap.csv", "w") as f:
+                                f.write(f"{parasolid_path},Parasolid_Import,Master_Assembly\n")
+                            
+                            # --- 4. LAUNCH CFD SOLVER ---
+                            status_box.info(f"🚀 Launching STAR-CCM+ for Run {run_id}...")
+                            process = subprocess.Popen([
+                                starccm_exe, 
+                                "-np", str(cores), 
+                                "-batch", "Geometry_Janitor.java,master_sweep.java", 
+                                st.session_state.sim_file_path
+                            ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, encoding="utf-8", errors="replace")
+                            
+                            for line in iter(process.stdout.readline, ""):
+                                sys.stdout.write(line)
+                                sys.stdout.flush()
+                                log_file.write(line)
+                                log_file.flush()
+                            
+                            process.wait()
+                            
+                            # --- 5. PROCESS RESULTS & CLEANUP ---
+                            csv_path = os.path.join(specific_run_dir, "Aero_Map_Results.csv")
+                            if os.path.exists(csv_path) and os.stat(csv_path).st_size > 0:
+                                try:
+                                    run_result = pd.read_csv(csv_path)
+                                    run_result['Run_ID'] = run_id
+                                    cumulative_results = pd.concat([cumulative_results, run_result], ignore_index=True)
+                                    
+                                    # Save the master CSV to the root folder
+                                    cumulative_results.to_csv(os.path.join(run_dir, f"{run_name}.csv"), index=False)
+                                    
+                                    with live_monitor.container():
+                                        st.markdown(f"### 📡 Live Telemetry: Run {idx+1} / {actual_runs} Completed")
+                                        st.dataframe(cumulative_results, width='stretch')
+                                        
+                                except Exception as csv_err:
+                                    st.error(f"🚨 Failed to process results CSV for Run {run_id}: {csv_err}")
+                                    
+                            if uses_nx and os.path.exists(parasolid_path):
+                                try: os.remove(parasolid_path)
+                                except: pass
+
+                    if not os.path.exists("stop_sweep.txt"):
+                        status_box.success("✅ Batch Complete!")
                         
                 except Exception as e:
                     status_box.error(f"🚨 Process Launch Failed: {e}")
                     
                 finally:
-                    try:
-                        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
-                    except Exception:
-                        pass
-                
-        else:
-            st.info("Review your Pre-Run Evaluation. Once satisfied, hit **Launch Batch**.")
+                    try: ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+                    except Exception: pass
+                    
+                    if not cumulative_results.empty:
+                        real_results = cumulative_results
 
         # ==========================================
         # --- UNIFIED POST-RUN RESULTS RENDERING ---
@@ -582,12 +705,27 @@ with tab2:
                 if os.path.exists("sweep_config.txt"): shutil.move("sweep_config.txt", os.path.join(run_dir, "sweep_config.txt"))
                 if os.path.exists("geometry_swap.csv"): shutil.move("geometry_swap.csv", os.path.join(run_dir, "geometry_swap.csv"))
 
-            param_1 = real_results.columns[1]
-            col2_name = real_results.columns[2].lower()
+           # --- DYNAMIC DIMENSION DETECTION ---
+            known_outputs = ["cla", "cda", "cma", "cra", "cya", "balance", "cells", "solver", "cpu", "cop", "force", "moment", "area", "run_id"]
             
-            is_2d_plot = any(x in col2_name for x in ['height', 'angle', 'yaw', 'pitch', 'roll', 'sweep', 'radius'])
-            param_2_plot = real_results.columns[2] if is_2d_plot else None
-            plot_targets = list(real_results.columns[3:]) if is_2d_plot else list(real_results.columns[2:])
+            # Identify columns that do NOT contain target report keywords
+            parameter_cols = [col for col in real_results.columns if not any(kw in col.lower() for kw in known_outputs)]
+            
+            if len(parameter_cols) >= 2:
+                is_2d_plot = True
+                param_1 = parameter_cols[0]
+                param_2_plot = parameter_cols[1]
+                # Targets are everything else except Run_ID
+                plot_targets = [col for col in real_results.columns if col not in parameter_cols and col != "Run_ID"]
+            elif len(parameter_cols) == 1:
+                is_2d_plot = False
+                param_1 = parameter_cols[0]
+                param_2_plot = None
+                plot_targets = [col for col in real_results.columns if col not in parameter_cols and col != "Run_ID"]
+            else:
+                st.warning("⚠️ Could not detect parameters in the CSV.")
+                plot_targets = []
+                
             plot_targets = [t for t in plot_targets if not t.startswith('95%')]
             
             if not plot_targets:
@@ -638,13 +776,82 @@ with tab2:
                             Z_pred = y_pred.reshape(X.shape) 
                             Margin_95_pred = (sigma * 1.96).reshape(X.shape)
                             
-                            htemp_3d = f"{param_1}: %{{x:.4f}}<br>{param_2_plot}: %{{y:.4f}}<br>{target}: %{{z:.4f}}<br>95% Confidence Bound (±): %{{customdata:.5f}}<extra></extra>"
-                            fig2 = go.Figure()
-                            fig2.add_trace(go.Surface(z=Z_pred, x=X, y=Y, customdata=Margin_95_pred, colorscale='Viridis', name='GP Surface', opacity=0.9, hovertemplate=htemp_3d))
-                            htemp_truth_3d = f"Run ID: %{{text}}<br>{param_1}: %{{x:.4f}}<br>{param_2_plot}: %{{y:.4f}}<br>{target}: %{{z:.4f}}<extra></extra>"
-                            fig2.add_trace(go.Scatter3d(x=x_true, y=y_true, z=z_true, mode='markers+text', marker=dict(size=5, color='black'), text=[str(j) for j in real_results['Run_ID']], textposition="top right", name='CFD Truth Data', hovertemplate=htemp_truth_3d))
-                            fig2.update_layout(scene=dict(xaxis_title=param_1, yaxis_title=param_2_plot, zaxis_title=target), height=700)
-                            st.plotly_chart(fig2, width="stretch")
+                            # --- NEW TOGGLE UI ---
+                            view_style = st.radio("Visualization Style:", ["3D Surface (Interactive)", "2D Aero Map (Static)"], horizontal=True, key=f"view_{target}")
+                            
+                            if "3D" in view_style:
+                                htemp_3d = f"{param_1}: %{{x:.4f}}<br>{param_2_plot}: %{{y:.4f}}<br>{target}: %{{z:.4f}}<br>95% Confidence Bound (±): %{{customdata:.5f}}<extra></extra>"
+                                fig2 = go.Figure()
+                                fig2.add_trace(go.Surface(z=Z_pred, x=X, y=Y, customdata=Margin_95_pred, colorscale='Viridis', name='GP Surface', opacity=0.9, hovertemplate=htemp_3d))
+                                htemp_truth_3d = f"Run ID: %{{text}}<br>{param_1}: %{{x:.4f}}<br>{param_2_plot}: %{{y:.4f}}<br>{target}: %{{z:.4f}}<extra></extra>"
+                                fig2.add_trace(go.Scatter3d(x=x_true, y=y_true, z=z_true, mode='markers+text', marker=dict(size=5, color='black'), text=[str(j) for j in real_results['Run_ID']], textposition="top right", name='CFD Truth Data', hovertemplate=htemp_truth_3d))
+                                fig2.update_layout(scene=dict(xaxis_title=param_1, yaxis_title=param_2_plot, zaxis_title=target), height=700)
+                                st.plotly_chart(fig2, width="stretch")
+                                
+                            else:
+                                # --- NEW PLOTLY 2D AERO MAP ---
+                                from plotly.subplots import make_subplots
+                                
+                                fig_2d = make_subplots(rows=1, cols=2, subplot_titles=(f"{target} Response", "Uncertainty"))
+                                htemp_2d = f"{param_1}: %{{x:.4f}}<br>{param_2_plot}: %{{y:.4f}}<br>{target}: %{{z:.4f}}<br>95% Bound (±): %{{customdata:.4f}}<extra></extra>"
+                                
+                                # -----------------------------------
+                                # PLOT 1: Clean Aero Map (20 Levels)
+                                # -----------------------------------
+                                fig_2d.add_trace(go.Contour(
+                                    z=Z_pred, x=x, y=y, customdata=Margin_95_pred,
+                                    colorscale='Viridis',
+                                    hovertemplate=htemp_2d,
+                                    ncontours=20,  # Forces higher contour density
+                                    colorbar=dict(title=target, x=0.45, len=1.0), 
+                                ), row=1, col=1)
+                                
+                                # -----------------------------------
+                                # PLOT 2: Fog Overlay + Scatter
+                                # -----------------------------------
+                                # A. Base vivid layer (20 Levels)
+                                fig_2d.add_trace(go.Contour(
+                                    z=Z_pred, x=x, y=y, customdata=Margin_95_pred,
+                                    colorscale='Viridis',
+                                    showscale=False,
+                                    ncontours=100,  # Matches Plot 1
+                                    contours=dict(showlines=False),
+                                    hovertemplate=htemp_2d
+                                ), row=1, col=2)
+                                
+                                # B. The White Fog Layer (100 Levels, Smooth Fade)
+                                fog_colorscale = [[0.0, 'rgba(255, 255, 255, 0.0)'], [1.0, 'rgba(255, 255, 255, 0.1)']]
+                                fig_2d.add_trace(go.Contour(
+                                    z=Margin_95_pred, x=x, y=y,
+                                    colorscale=fog_colorscale,
+                                    hoverinfo='skip',
+                                    showscale=False,  # Removes the ugly black colorbar
+                                    ncontours=100,    # High resolution for the fog
+                                    contours=dict(showlines=False)  # Hides fog lines for a smooth gradient fade
+                                ), row=1, col=2)
+                                
+                                # C. Truth Data Scatter (Black X markers)
+                                htemp_scatter = f"Run ID: %{{text}}<br>{param_1}: %{{x:.4f}}<br>{param_2_plot}: %{{y:.4f}}<br>{target}: %{{customdata:.4f}}<extra></extra>"
+                                fig_2d.add_trace(go.Scatter(
+                                    x=x_true, y=y_true, customdata=z_true,
+                                    mode='markers+text', 
+                                    marker=dict(size=8, color='black', symbol='x'),
+                                    text=[str(j) for j in real_results['Run_ID']], 
+                                    textposition="top right", 
+                                    hovertemplate=htemp_scatter,
+                                    showlegend=False
+                                ), row=1, col=2)
+                                
+                                # -----------------------------------
+                                # FORMATTING & RENDERING
+                                # -----------------------------------
+                                fig_2d.update_layout(height=600, template='plotly_white')
+                                fig_2d.update_xaxes(title_text=param_1, row=1, col=1)
+                                fig_2d.update_yaxes(title_text=param_2_plot, row=1, col=1)
+                                fig_2d.update_xaxes(title_text=param_1, row=1, col=2)
+                                fig_2d.update_yaxes(title_text=param_2_plot, row=1, col=2)
+                                
+                                st.plotly_chart(fig_2d, width="stretch")
 
             if export_csv_table:
                 st.markdown("---")
